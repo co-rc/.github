@@ -2,10 +2,16 @@
 
 I'm proud to present **Corc**, a multi-channel remote control stack for physical devices.
 
-Corc lets a single controller app orchestrate different kinds of devices over multiple transports – starting with BLE/GATT and USB HID.
+Corc lets different kinds of remote controllers orchestrate different kinds of devices over multiple transports – starting with BLE/GATT and USB HID.
 
-> Organization: [`co-rc`](https://github.com/co-rc)
-> Project name: **Corc** (`Control & Remote Core`)
+> Organization: [`co-rc`](https://github.com/co-rc)  
+> Project name: **Corc**  
+> Possible expansions: *cooperative Remote Control*, *Common RC transport*
+
+The common idea is a **transport gateway** that lets you replace existing remote controllers and build unusual / custom remotes, while keeping the transport plumbing reusable.
+
+> If you are not into Bluetooth: in this project you can think of **GATT** as  
+> “the protocol a Bluetooth remote controller uses to talk to a TV”.
 
 ---
 
@@ -19,28 +25,116 @@ Corc is distributed under the **Apache License 2.0** (Apache-2.0).
 
 Early design / prototyping phase.
 
-* APIs and protocol layout are still evolving.
-* Expect breaking changes at this stage.
-* Repository layout and names may change while things are being bootstrapped.
+- APIs and protocol layout are still evolving.
+- Expect breaking changes at this stage.
+- Repository layout may change while things are being bootstrapped.
 
 If you are reading this and the code is not here yet, this README is describing the intended scope and architecture.
 
 ---
 
+## Example topologies (ASCII diagrams)
+
+### 1. Android app → BLE bridge → TV (simple use case)
+
+```text
++-----------------------------------------------------------+
+|                 Android TV Remote app                     |
+|  [ Power ]  [ Vol+ ]  [ Vol- ]  [ Mute ]  [   Input   ]   |
+|                                                           |
+|         (Android application acting as remote)            |
++-------------------------------+---------------------------+
+                                |
+                                |  Bluetooth LE (GATT)
+                                v
++-------------------------------+---------------------------+
+|                         BLE bridge                        |
+|                  (PicoW / ESP32 + MicroPython             |
+|                     running Corc firmware)                |
++-------------------------------+---------------------------+
+                                |
+                                |  GATT control of TV
+                                v
+                .---------------------------------.
+                |     ___________                 |
+                |    |           |                |
+                |    |   TV      |                |
+                |    |  screen   |                |
+                |    |___________|                |
+                |                                 |
+                '---------------------------------'
+````
+
+BLE bridge is planned as a **microcontroller (e.g. Raspberry Pi Pico W or ESP32) running MicroPython** with firmware from this project.
+
+---
+
+### 2. IR remote → GATT bridge → multiple end devices
+
+In this setup the **“brain”** is not an Android app but an existing IR remote.
+Corc only provides the **GATT bridge / transport gateway**:
+
+```text
++-------------------+       IR        +---------------------------+
+|  IR remote        |  ------------>  |  GATT bridge              |
+|  (remote controller)                |  (transport gateway)      |
++-------------------+                 +-------------+------------+
+                                                    |
+                                                    | GATT
+                                                    v
+                                       +------------+------------+
+                                       |   Bulb #1               |
+                                       +-------------------------+
+                                       +-------------------------+
+                                       |   Bulb #2               |
+                                       +-------------------------+
+```
+
+The GATT bridge can translate between IR commands and GATT operations for multiple end devices.
+
+---
+
+### 3. Android app → USB HID keyboard bridge
+
+```text
++-------------------+   Corc commands   +---------------------------+
+| Android app       |  ---------------> |  USB HID keyboard bridge  |
+| (remote controller|                   |  (USB device)             |
++-------------------+                   +-------------+------------+
+                                                    |
+                                                    | USB HID (scan codes)
+                                                    v
+                                          +---------+----------+
+                                          |   PC / TV host     |
+                                          |   sees: keyboard   |
+                                          +--------------------+
+```
+
+Here Corc lets an Android-based remote controller drive a **USB keyboard-like device** that exposes HID scan codes such as **PowerOff, Sleep, Volume Up/Down, Mute**.
+No additional software is required on the host – it just sees a standard USB keyboard.
+
+---
+
 ## Goals
 
-* **One brain, many transports**
-  A single control app (initially Android) talks to multiple backends over a unified protocol.
+* **Reusable transport gateway**
+  Reuse the same “transport plumbing” (Bluetooth, GATT, USB HID, etc.) across different remote controllers and scenarios.
+
+* **One remote controller per setup (but not globally one brain)**
+  In some setups the brain is an **Android app**; in others it might be an **IR remote** or something else. Corc focuses on the **transport layer**, not on forcing a single global controller.
+
 * **Pluggable transports**
-  BLE → GATT, GATT → GATT fan-out, USB HID keyboard – and more in the future – all share the same command model.
+  BLE → GATT bridges, GATT → GATT bridges, USB HID keyboard bridges – and more in the future – all share the same command model.
+
 * **Simple mental model**
-  From the app’s perspective there is “a device” and “a command”, not “BLE vs HID vs GATT”.
+  From the controller’s perspective there is “a device” and “a command”, not “BLE vs HID vs GATT”.
+
 * **Hackable and explicit**
   Clear separation between:
 
-  * UI / control logic
-  * protocol / model
-  * transport-specific adapters
+  * remote controller logic (Android app, IR remote, etc.),
+  * protocol / model,
+  * transport-specific bridges / adapters.
 
 ---
 
@@ -48,71 +142,95 @@ If you are reading this and the code is not here yet, this README is describing 
 
 Corc is split into a few logical components.
 
-### 1. Controller app (Android)
+### 1. Controller app (Android remote controller)
 
-The main “brain” of the system:
+One of the possible “brains” of a setup:
 
 * defines and issues **commands** (e.g. “button X pressed”, “send key Y”, “toggle Z”),
 * discovers and manages **devices**,
-* routes commands to the right **transport**.
+* routes commands to the right **transport** via Corc bridges.
 
-Planned repository (example):
+Implementation details:
 
-* `co-rc/android` or `co-rc/corc-android`
+* Android app developed using **IntelliJ IDEA + Android plugin**,
+  not necessarily Android Studio.
 
-### 2. BLE pilot (BLE → GATT)
+---
 
-A “pilot” that talks over BLE to physical hardware exposed via GATT.
+### 2. BLE bridge (BLE → GATT remote controller / transport)
+
+A BLE-based remote controller bridge that talks to physical hardware exposed via GATT.
 
 Responsibilities:
 
 * handle BLE discovery / connection,
-* expose a GATT-based API,
+* expose a GATT-based API (Generic Attribute Profile),
 * translate Corc commands to GATT operations and back (notifications, indications, reads/writes).
 
-Planned repository:
+Implementation notes:
 
-* `co-rc/ble-pilot` or `co-rc/corc-ble-pilot`
+* based on a **microcontroller board (e.g. Raspberry Pi Pico W or ESP32)**,
+* running **MicroPython**,
+* firmware and reference hardware design (schematics / wiring) will live inside Corc repositories.
 
-### 3. GATT gateway (GATT → GATT fan-out)
+---
 
-A gateway that takes commands from a single pilot and fans them out to multiple downstream GATT devices.
+### 3. GATT bridge (GATT → GATT fan-out)
+
+A GATT transport gateway that can be used with different “brains”
+(e.g. an Android remote controller or an existing IR remote with an IR→GATT front-end).
 
 Responsibilities:
 
-* accept a **GATT-based control channel** from the pilot,
+* accept a **control channel** (exposed over GATT),
 * maintain connections to multiple GATT end devices,
 * route and multiplex commands, map logical devices to physical addresses.
 
-Planned repository:
+Implementation notes:
 
-* `co-rc/gatt-gateway` or `co-rc/corc-gatt-gateway`
+* software and any reference hardware are part of Corc,
+* meant to be reusable for multiple scenarios (IR remote, Android, etc.).
 
-### 4. USB HID keyboard (host-side bridge)
+---
 
-A bridge that makes it possible to drive a USB HID keyboard from the same controller app (no GATT involved).
+### 4. USB HID keyboard bridge (remote-controlled keyboard device)
+
+A **device**, similar in spirit to the BLE bridge, controlled from an Android remote controller and exposing itself as a USB keyboard to a host (PC, TV, etc.).
 
 Responsibilities:
 
-* expose a Corc-compatible command interface for “keyboard events”,
-* map Corc key/shortcut events to USB HID reports,
-* run on a host that has access to USB devices.
+* receive Corc commands from a remote controller (e.g. Android app),
+* map those commands to USB HID **scan codes**, such as:
 
-Planned repository:
+  * `PowerOff`
+  * `Sleep`
+  * `Volume Up`
+  * `Volume Down`
+  * `Mute`
+* present itself as a standard USB HID keyboard to the host.
 
-* `co-rc/hid-keyboard` or `co-rc/corc-hid-keyboard`
+Implementation notes:
+
+* based on a **microcontroller board acting as a USB device**,
+* firmware is part of Corc (no host-side software required),
+* the host (PC / TV) only sees “a keyboard” sending the above scan codes.
+
+---
 
 ### 5. Shared protocol / model
 
 A small, shared model used across all components:
 
-* **Device** – logical identifier, type, capabilities
-* **Command** – abstract “thing to do”, transport-agnostic
-* **Transport** – adapter that knows how to encode/decode commands for a specific channel
+* **Device** – logical identifier, type, capabilities.
+* **Command** – abstract “thing to do”, transport-agnostic.
+* **Transport / Bridge** – adapter that knows how to encode/decode commands for a specific channel
+  (BLE/GATT, GATT→GATT, USB HID, …).
 
-Planned repository:
+The same protocol can be used by:
 
-* `co-rc/protocol` or `co-rc/corc-protocol`
+* Android remote controller,
+* IR-based setups (through appropriate front-ends),
+* other future remote controllers.
 
 ---
 
@@ -123,66 +241,78 @@ From the controller’s point of view, Corc is:
 ```text
 Device       = something that can receive commands
 Command      = description of what should happen
-Transport    = implementation detail
+Transport    = implementation detail handled by a Corc bridge
 ```
 
 Examples:
 
-* BLE pilot:
+* BLE bridge (remote controller):
 
-  * Device: “Pilot v1”
-  * Commands: “button A”, “button B”, “mode X”
+  * Device: “TV”, “LED strip”
+  * Commands: “volume up”, “power toggle”, “brightness 50%”
   * Transport: BLE + GATT
 
-* GATT gateway:
+* GATT bridge:
 
-  * Device: “Bulb #1”, “Bulb #2”, “Strip #1”
+  * Device: “Bulb #1”, “Bulb #2”
   * Command: “set brightness 50%”, “turn off”
   * Transport: GATT
 
-* HID keyboard:
+* USB HID keyboard bridge:
 
   * Device: “Host keyboard”
-  * Command: “send key A”, “send ENTER”, “send Ctrl+Alt+Del”
+  * Command: “PowerOff”, “Sleep”, “Volume Up/Down”, “Mute”
   * Transport: USB HID
 
-The controller never has to know whether a specific command is executed via BLE, GATT, HID, or something else – each channel is just an implementation of the same command interface.
+The controller does not need to know whether a specific command is executed via BLE, GATT, HID, or something else – each channel is just an implementation of the same command interface.
 
 ---
 
 ## Repository layout (planned)
 
-Under the `co-rc` organization:
+Under the `co-rc` organization, Corc will be split into functional parts such as:
 
-* `android` / `corc-android` – controller app
-* `ble-pilot` / `corc-ble-pilot` – BLE → GATT pilot
-* `gatt-gateway` / `corc-gatt-gateway` – GATT → GATT fan-out gateway
-* `hid-keyboard` / `corc-hid-keyboard` – USB HID keyboard bridge
-* `protocol` / `corc-protocol` – shared protocol, model, and contracts
-* `examples` – example integrations, sample configs, debug tools
+* Android remote controller application.
+* BLE bridge:
 
-Exact names may differ; check the organization page for the final layout.
+  * MicroPython firmware for BLE / GATT remote controller.
+  * Reference hardware (e.g. Pico W / ESP32 wiring / board).
+* GATT bridge:
+
+  * GATT→GATT fan-out transport gateway.
+* USB HID keyboard bridge:
+
+  * Microcontroller firmware for a remote-controlled USB keyboard device.
+* Shared protocol / model:
+
+  * common command and device abstractions, serialization, etc.
+* Examples and tools:
+
+  * demonstration setups, debug tools, small utilities.
+
+Exact repository names may evolve; check the organization page for the current layout.
 
 ---
 
-## Getting started
+## Getting started (high-level)
 
-> This section will evolve as the first reference implementations are published.
+This section will evolve as the first reference implementations are published.
 
-### Prerequisites
+A typical BLE-based setup might look like:
 
-* Android development environment (Android Studio, recent SDK) for the controller app.
-* BLE-capable hardware for the pilot.
-* GATT-capable end devices for the gateway.
-* A host with USB HID support for the keyboard bridge.
+1. Clone the relevant Corc repositories from `co-rc`.
+2. Open the Android project in **IntelliJ IDEA with the Android plugin**.
+3. Build and install the Android remote controller app on a device.
+4. Build and flash the BLE bridge firmware (MicroPython + Corc code) onto a supported microcontroller (e.g. Pico W / ESP32) using the hardware and instructions provided in the Corc repos.
+5. Power up the BLE bridge and pair it with the Android app.
+6. Discover and control end devices from the app.
 
-### Typical setup
+For GATT bridges and USB HID keyboard bridges, similar steps will apply:
 
-1. Clone the relevant repositories from the `co-rc` organization.
-2. Build and install the Android app on a device.
-3. Deploy the BLE pilot to the target hardware.
-4. Run the GATT gateway and/or USB HID keyboard bridge on the appropriate host.
-5. Pair devices in the Android app and send commands.
+* use Corc-provided firmware and reference hardware designs,
+* flash the appropriate bridge firmware onto a supported microcontroller board,
+* connect the board to the target host (e.g. USB for the keyboard bridge),
+* pair the bridge with the chosen remote controller.
 
 As the project matures, this section will contain concrete build commands, example configs, and step-by-step guides.
 
@@ -191,19 +321,22 @@ As the project matures, this section will contain concrete build commands, examp
 ## Roadmap (draft)
 
 * [ ] Define and stabilize the core Corc protocol / command model.
-* [ ] Publish the Android controller app skeleton.
-* [ ] First BLE pilot reference implementation.
-* [ ] First GATT gateway reference implementation.
-* [ ] USB HID keyboard bridge (basic keys).
+* [ ] Publish the first Android remote controller skeleton.
+* [ ] First BLE bridge (MicroPython + PicoW/ESP32) reference implementation.
+* [ ] First GATT bridge (GATT→GATT fan-out) reference implementation.
+* [ ] USB HID keyboard bridge (PowerOff/Sleep/Vol/Mute scan codes).
 * [ ] Unified discovery and device registry.
-* [ ] Example setups and demo scenarios.
+* [ ] Example setups and demo scenarios (Android BLE remote, IR remote with GATT bridge, USB keyboard control).
 
 ---
 
 ## Contributing
 
-Right now the project is in an early design phase.
-If you are interested in contributing:
+At this stage Corc is still being sketched and bootstrapped.
 
-* open an issue in the relevant repository under `co-rc`,
-* or start a discussion about use-cases and transports you would like to see.
+There is no formal contribution process yet, but **feel free to contribute** once code is available:
+
+* by opening issues with ideas or bug reports,
+* by sending pull requests to improve the code or documentation.
+
+Details about code style, review process, and governance will be added once the project stabilizes.
